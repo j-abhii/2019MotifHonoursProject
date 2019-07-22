@@ -1,0 +1,398 @@
+---
+title: "abhi_scRNA_v2_glmnet"
+author: "Abhishek Jain"
+date: "10th April 2019"
+output: 
+  md_document:
+    variant: markdown_github
+editor_options:
+  chunk_output_type: console
+---
+
+# Note: Chunks at the end are set to NOT RUN AUTOMATICALLY 
+  
+## Objectives: 
+
+  1. Repeat CV calculation like before
+  2. Import and use a motifs list to generate motifs table (Using Regex)
+  3. Use glmnet for penalised regression analysis of effect on CV^2
+  4. Compile list of genes for each glmnet motif for GO Term Analysis
+  
+## Initation:
+
+```{R Setup}
+library(tidyverse)
+library(glmnet)
+library(ggplot2)
+  
+  theme_coding <- function(){
+  theme_bw()+
+  theme(axis.text.x = element_text(size = 12),
+        axis.text.y = element_text(size = 12),
+        axis.title = element_text(size = 13),
+        panel.grid = element_blank(),
+        plot.margin = unit(c(0.5, 0.5, 0.5, 0.5), units = , "cm"),
+        plot.title = element_text(size = 20, vjust = 1, hjust = 0.5),
+        legend.text = element_text(size = 12),
+        legend.title = element_blank(),
+        legend.position = c(0.9, 0.9))
+}
+
+  x_y_titles <- function(){
+    
+    
+  }
+  
+#defining fun color for scheming
+colour <- c(teal = "#237E8A", green = "#1A8A21", red = "#A62621")
+
+```
+
+
+
+
+Then, create a tibble with motifs for every gene:
+Note: Raw data already had motif counts but were combined for 3' and 5' UTRs and are not individual.
+
+```{R Freq of Motifs}
+
+motifs <- motifs_raw %>% str_replace_all(c("U" = "T", "W" = "(A|T)", "S" = "(C|G)", "M" = "(A|C)", "K" = "(G|T)", "R" = "(A|G)", "Y" = "(C|T)", "B" = "(C|G|T)", "D" = "(A|G|T)", "H" = "(A|C|T)", "V" = "(A|C|G)", "N" = "(A|C|G|T)"))
+
+#Initate ref tibble and store gene names
+ref_motifs <- tibble(geneName = UTR_raw$genename)
+
+
+#Search and add frequency of each c(motif) as a column in ref dataset
+for (i in 1:length(motifs)){
+ref_motifs <- mutate(.data = ref_motifs, 
+                      !!motifs_raw[i] := str_count(UTR_3, motifs[i]))
+}
+
+
+```
+
+
+Calculate various cell to cell variation estimates; 
+
+  Note: previous version used linear model for each measure and showed best performance for log(CV^2)
+
+```{R Calculate CV}
+
+#new dataframe with cell to cell differences from sc_raw data
+sc_summ_various <- sc_raw %>%
+  select(-comGeneName)%>%
+  gather(key = "cell", value = "transcripts", select = -geneName)%>%
+    group_by(geneName)%>%
+      #add columns with different measures of variation
+      summarize(mean_t = mean(transcripts), 
+             stdev_t = sd(transcripts),
+             variance_t = var(transcripts))%>%
+      filter(mean_t > 0)%>%
+      mutate(VMR_t = variance_t/mean_t,
+             CV_t = stdev_t/mean_t,
+             CV2_t = (CV_t^2))
+
+sc_summ <- sc_summ_various %>%
+  select(geneName, CV2_t, mean_t)
+```
+
+```{R Add CV2 and Motif Counts}
+#add coefficient of variation
+ref_motifs_t <- left_join(ref_motifs, sc_summ, by = "geneName")%>%
+  filter(is.finite(CV2_t))
+
+```
+
+```{R Setup Data for regression}
+#motifs = c("TGTAAATA", "TGCAT", "TTTTTTA", "ATATTC")
+
+model_data <- ref_motifs_t %>%
+  #convert motif frequencies to presence and then to factor
+  mutate_at(motifs_raw, funs(replace(., .>= 1, 1)))%>%
+  mutate_at(motifs_raw, funs(factor(.) ))%>%
+  mutate(log_CV2_t = log(CV2_t))%>%
+  select(-CV2_t)
+        
+
+```
+
+Following section performs lasso regression using glmnet. First, a model matrix is created for variables (motifs), then a glmnet is performed on response (log_CV2_t) yielding a tibble from cross validated glmnet containing each motif's coefficient. 
+
+Then motifs are filtered for non-zero coefficients.
+
+```{R glmnet}
+
+motifs_matrix <- model_data %>%
+  select(-geneName, -log_CV2_t, -mean_t) %>%
+  sapply(., strtoi)%>%
+  data.matrix()
+
+  motifs_glm <- glmnet(motifs_matrix, y = model_data$log_CV2_t)
+plot(motifs_glm, xvar="lambda")
+
+#Cross Validated Glmnet to get lambda.min for extracting coeffs 
+motifs_cv_glm <- cv.glmnet(x = motifs_matrix, y = model_data$log_CV2_t)
+plot(motifs_cv_glm)
+
+coefs <- data.matrix(coef(motifs_cv_glm, s = "lambda.min"))
+#coefs <- data.matrix(coef(motifs_glm, s = motifs_cv_glm$lambda.1se))
+#Create a tibble of coefficients ordered by absolute value
+sig_glms <- tibble(
+      motif_glmnet = rownames(coefs)[coefs != 0],
+      coeff_glmnet = coefs[coefs != 0]
+    ) %>%
+        arrange(desc(abs(coeff_glmnet)))
+
+sig_motifs <- filter(sig_glms, motif_glmnet != "(Intercept)")$motif_glmnet
+
+#averaging MSEs of cv.glmnet
+MSEs <- NULL
+for (i in 1:100){
+    motifs_cv_glm <- cv.glmnet(x = motifs_matrix, 
+                               y = model_data$log_CV2_t,
+                               nfolds = 100)
+    MSEs <- cbind(MSEs, motifs_cv_glm$cvm)
+}
+rownames(MSEs) <- motifs_cv_glm$lambda
+lambda.min <- as.numeric(names(which.min(rowMeans(MSEs))))
+
+```
+
+
+Then create a list of genes containing these motifs, (list of vectors) and then manually performed Gene Ontology on each list
+  See: "/data/motifs_fun" for GO results
+
+```{R List Genes with motifs, eval = FALSE, include = FALSE}
+genes_present_l <- list()
+#sig_motifs is the list of motifs without intercept
+for (each_m in sig_motifs)
+  {
+  #add all geneName values with 1 for each motif to a list of vectors
+  genes_present_l[[each_m]] <- filter(.data = model_data, 
+                           !!as.name(each_m) == 1)$geneName
+
+  #write(x = genes_present_l[[each_m]], 
+        #file = paste0("data/motifs_fun/", each_m, ".txt"))
+  }
+
+#cleanup
+remove(each_m)
+
+```
+
+
+```{R Plot CV2 vs Mean}
+#plot CV2 vs mean transcript numbers
+sc_summ %>% select(geneName, CV2_t, mean_t) %>%
+ggplot(., aes(x = mean_t, y = CV2_t)) +
+  geom_point() +
+  xlab("log(mean)") +
+  scale_x_continuous(trans = "log10", 
+                     breaks = c(0.001, 0.01, 0.1, 1, 10, 100),
+                     labels = c("0.001", "0.01", "0.1", "1", "10", "100")) +
+  ylab("log(CV^2)") +
+  scale_y_continuous(trans = "log10", 
+                     breaks = c(0.1,0.5,5.0,50.0))
+
+```
+
+Plotting CV^2 vs. half life in RMA regression (Since both axes have high variation, cannot use standard lm)
+
+```{R Plot Cv^2 vs DR}
+#import dr_raw
+dr_raw <- read_tsv("data/sun_total_dr.txt", locale = locale(decimal = ","))
+dr_raw_k <- read_tsv("data/new_karsten_dr_data.txt")
+  
+#change weird name of third column of wt degradation rate and orf to geneName
+colnames(dr_raw)[3] <- "d_rate"
+colnames(dr_raw)[1] <- "geneName" 
+
+#convert degradation rate to hlife
+dr_data <- dr_raw %>%
+  dplyr::select(geneName, d_rate) %>%
+    mutate(hlife = log(2)/d_rate) %>% 
+      select(-d_rate)
+
+dr_data_k <- dr_raw_k %>% 
+  rename_all(~c("geneName","gene","hlife_r1","hlife_r2")) %>%
+    dplyr::select(-gene) %>%
+      mutate(hlife = rowMeans(cbind(hlife_r1, hlife_r2), na.rm = TRUE)) %>% 
+        filter(is.finite(hlife)) %>%
+          select(geneName, hlife)
+  
+com_sc_dr <- left_join(dr_data, sc_summ, by = "geneName")%>%
+  dplyr::select(-mean_t) %>%
+    filter(is.finite(CV2_t))
+
+com_sc_dr_k <- left_join(dr_data_k, sc_summ, by = "geneName")%>%
+  dplyr::select(-mean_t) %>%
+    filter(is.finite(CV2_t))
+
+
+#for RMA regression
+library(lmodel2)
+#
+rma_mod <- lmodel2(data = com_sc_dr, log(CV2_t) ~ log(hlife),"interval", "interval")
+
+rma_mod_k <- lmodel2(data = com_sc_dr_k, log(CV2_t) ~ log(hlife),"interval", "interval")
+
+#plot CV2 vs half life
+plot_cv2_hlife <- com_sc_dr %>% select(geneName, hlife, CV2_t) %>%
+ggplot(., aes(x = log(hlife), y = log(CV2_t))) +
+  geom_point(col = colour["teal"], alpha = 0.25) + 
+    scale_x_continuous(limits = c(0, 5)) + 
+  theme_coding() + 
+  geom_abline(slope = rma_mod$regression.results$Slope[4], 
+              intercept = rma_mod$regression.results$Intercept[4], 
+              col = colour["red"], size = 1) + 
+  labs(x = "log(Half Life)", 
+       y = bquote(log(CV^2)), 
+       title = bquote(R^2 ==.(round(rma_mod$rsquare, 2))))
+
+plot_cv2_hlife_k <- com_sc_dr_k %>% select(geneName, hlife, CV2_t) %>%
+ggplot(., aes(x = log(hlife), y = log(CV2_t))) +
+  geom_point(col = colour["teal"], alpha = 0.25) + 
+    scale_x_continuous(limits = c(0, 5)) + 
+  theme_coding() + 
+  geom_abline(slope = rma_mod_k$regression.results$Slope[4], 
+              intercept = rma_mod_k$regression.results$Intercept[4], 
+              col = colour["red"], size = 1) + 
+  labs(x = "log(Half Life)", 
+       y = bquote(log(CV^2)), 
+       title = bquote(R^2 ==.(round(rma_mod_k$rsquare, 2))))
+
+gridExtra::grid.arrange(plot_cv2_hlife, plot_cv2_hlife_k, ncol = 2)
+
+#BOTH
+#do we need RMA Line
+#rma_mod_both <- lmodel2(data = com_both_dr, hlife_sun ~ hlife_kar,"interval", "interval")
+
+#par(mfrow = c(1,1))
+
+com_both_dr <- left_join(dr_data, dr_data_k, by = "geneName", suffix = c("_sun","_kar"))
+
+com_both_dr %>% 
+    ggplot(., aes(x = hlife_kar, y = hlife_sun)) +
+    geom_point(col = colour["teal"], alpha = 0.25) + 
+    scale_x_continuous(limits = c(NA, 80)) + 
+    scale_y_continuous(limits = c(NA, 80)) +
+    theme_coding() + 
+    #geom_abline(slope = rma_mod_both$regression.results$Slope[4], intercept = rma_mod_both$regression.results$Intercept[4], col = colour["red"], size = 1) + 
+    labs(y = "Half Life (min) Sun et al.,(2013)", 
+         x = "Half Life (min) Chan et al.,(2018)", 
+         title = bquote(R^2 ==.(round(rma_mod_both$rsquare, 2))))
+
+
+rma_mod_rep <- dr_raw_k %>% lmodel2(data = ., halflife_160412_r2 ~ halflife_160412_r1)
+dr_raw_k %>% 
+    ggplot(., aes(x = halflife_160412_r1, y = halflife_160412_r2)) +
+    geom_point(col = colour["teal"], alpha = 0.25) +
+    theme_coding() + 
+    scale_x_continuous(limits = c(NA, 80)) + 
+    scale_y_continuous(limits = c(NA, 80)) +
+    theme_coding() + 
+    labs(y = "Half Life (min) R1", 
+         x = "Half Life (min) R2", 
+         title = bquote(R^2 ==.(round(rma_mod_both$rsquare, 2))))
+
+```
+
+
+#This is Incomplete:
+Testing for correlation between increasing number of stability motifs vs CV^2
+```{R Test2, eval=FALSE, include=FALSE}
+#
+ref_motifs_t %>%
+  gather(key = "motif", value = "present", -geneName, -CV2_t, -mean_t) %>% 
+  filter(motif %in% sig_glms$motif_glmnet) %>% 
+  group_by(geneName) %>% 
+    summarize(mean_t = min(mean_t), CV2_t = min(CV2_t), motif = sum(present)) %>%
+    ggplot(aes(x = (motif), y = log(CV2_t))) +
+   geom_point()
+
+```
+
+
+```{R Overall lm of glmnet motifs, eval=FALSE, include=FALSE}
+all_lm <- lm(data = model_data_big, paste("log2_hlife", paste(sig_motifs, collapse = " + "), sep = " ~ "))
+
+summary(all_lm)
+```
+
+Following chunk tests for multiple runs of cv.glmnet lambda.min values and prints the number of sig_motifs found. 
+```{R Test Various Glmnet eval=FALSE, include=FALSE}
+ 
+for(i in 1:20){
+  motifs_cv_glm <- cv.glmnet(x = motifs_matrix, y = model_data$log_CV2_t)
+
+coefs <- data.matrix(coef(motifs_cv_glm, s = "lambda.min"))
+#coefs <- data.matrix(coef(motifs_glm, s = motifs_cv_glm$lambda.1se))
+#Create a tibble of coefficients ordered by absolute value
+sig_glms <- tibble(
+      motif_glmnet = rownames(coefs)[coefs != 0],
+      coeff_glmnet = coefs[coefs != 0]
+    ) %>%
+        arrange(desc(abs(coeff_glmnet)))
+
+
+print(length(sig_glms$motif_glmnet))
+}
+```
+
+
+```{R Test new glmnet}
+
+motifs_matrix <- model_data %>%
+  select(-geneName, -log_CV2_t, -mean_t) %>%
+  sapply(., strtoi)%>%
+  data.matrix()
+
+  motifs_glm <- glmnet(motifs_matrix, y = model_data$log_CV2_t)
+
+#averaging MSEs of cv.glmnet and extracting lowest lambda as lambda.min
+#MSEs <- NULL
+#for (i in 1:100){
+#    motifs_cv_glm <- cv.glmnet(x = motifs_matrix, 
+#                               y = model_data$log_CV2_t,
+#                               nfolds = 100)
+#    MSEs <- cbind(MSEs, motifs_cv_glm$cvm)
+#}
+#rownames(MSEs) <- motifs_cv_glm$lambda
+lambda_min <- 0.01573189 #as.numeric(names(which.min(rowMeans(MSEs))))
+
+coefs <- data.matrix(coef(motifs_glm, s = lambda_min))
+
+#Create a tibble of coefficients ordered by absolute value
+sig_glms <- tibble(
+      motif_glmnet = rownames(coefs)[coefs != 0],
+      coeff_glmnet = coefs[coefs != 0]
+    ) %>%
+        arrange(desc(abs(coeff_glmnet)))
+
+sig_glms <- filter(sig_glms, motif_glmnet != "(Intercept)")
+sig_motifs <- filter(sig_glms, motif_glmnet != "(Intercept)")$motif_glmnet
+
+
+
+```
+
+
+```{R Test Lm for all scRNA motifs}
+
+#column # of motifs that do not vary at all 
+n <- which(sapply(model_data, function(x) (is.character(x) | is.factor(x)) & length(unique(x))<2))
+
+#remove those motifs
+motifs_exist <- model_data %>%
+    dplyr::select(-n) %>% 
+       select(-geneName, -log_CV2_t, -mean_t) %>%
+          colnames()
+
+all_lm <- lm(data = model_data, paste("log_CV2_t", paste(sig_motifs, collapse = " + "), sep = " ~ "))
+
+all_lm_tidy <- broom::tidy(all_lm) %>%
+  #arrange(p.value) %>%
+    mutate(p_adj_fdr = p.adjust(p.value, method = "fdr"))
+
+all_lm_dr <- lm(data = dr_data, paste("log_CV2_t", paste(sig_motifs, collapse = " + "), sep = " ~ "))
+```

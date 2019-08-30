@@ -11,6 +11,7 @@ editor_options:
 
 ##THIS FILE: 
 1. Running Combined Modelling on Sun et al data, trying to replicate Cheng et al 2017 findings. 
+2. Added motif HUUUUUUHW manually to raw_motifs (no longer in motifs list file)
 
 ## Initation:
 ```{R Setup}
@@ -69,6 +70,7 @@ ref_raw <- read_rds("data/Sun_mutation_UTRs.rds")
   
 #Load Manually created motifs list into a vector
 motifs_raw <- scan("data/list_motifs.txt", character())
+motifs_raw <- c(motifs_raw, "HUUUUUUHW")
 
 #load list of 12 Chimeric Terminator Genes  
 list_genes <- scan("data/genes_terminators_list.txt", character())
@@ -505,4 +507,15 @@ left_join(sel_motifs0, sel_codons0, by = "comgeneName") %>%
     mutate(pred_motifs = pred_motifs - intercept) %>%
     mutate(intercept = lm_step$coefficients[1]) %>%
     mutate(pred_overall = pred_codons + pred_motifs)
+```
+
+```{R Compare Decay Datasets Completeness}
+#creates an operator for Not %in%
+  '%!in%' <- function(x,y)!('%in%'(x,y))
+
+dr_data_k$geneName[dr_data_k$geneName %!in% dr_data_s$geneName] %>% length()
+
+dr_data_s$geneName[dr_data_s$geneName %!in% dr_data_k$geneName] %>% length()
+
+
 ```

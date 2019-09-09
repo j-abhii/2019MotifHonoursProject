@@ -197,7 +197,7 @@ model_unified_pr <- left_join(model_combined, unified_pr_data, by = c("geneName"
 ```{R Linear Modelling}
 predictors <- paste(c(paste(codons, collapse = " + "),
                   paste(motifs_present, collapse = " + ")), 
-                collapse = " + ")
+                collapse = " + ") 
 
 lm_motifs_dr <- lm(data = model_motifs, paste("log2_hlife",
                                               paste(motifs_present,

@@ -88,12 +88,12 @@ calc_CU <- function(data, codons, geneID = "genename", CDS = "CDS_seq"){
     sapply(seq_list, function(each_vec){
       sum(str_count(each_vec, pattern = each_codon))/length(each_vec)
       })
-  }), codons))) %>% select(-TTT)
+  }), codons))) %>% select(-TTT, -CDS_seq)
 }
 
 
     
-ref_codons <- calc_CU(test_df, codons_raw, geneID = "geneName")
+ref_codons <- calc_CU(ref_raw, codons_raw, geneID = "genename")
 
 
 ```
@@ -148,3 +148,9 @@ ref_data <- left_join(ref_motifs_fil, ref_codons, by = "geneName")
 
 ```
 
+Export Data into a CSV
+
+```{R Export Reference Data}
+write_csv(ref_data, path = "data/ref_data.csv")
+
+```

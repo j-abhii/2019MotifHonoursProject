@@ -99,6 +99,48 @@ ref_codons <- calc_CU(ref_raw, codons_raw, geneID = "genename")
 ```
 
 
+```{R CU Test}
+#sunetal CU
+sunetal_codon <- ref_raw %>% as_tibble %>%
+  select(genename, CDS_seq, TTT:GGG) %>%
+    rename(geneName = genename) %>%
+  gather(key = "codon", value = "freq", TTT:GGG) %>%
+    mutate(freq = freq/nchar(CDS_seq)) %>%
+  spread(codon, freq) %>%
+    select(geneName, codons_1) 
+
+sam_codon <- tibble(geneName = ref_raw$genename, ORF = as.character(ref_raw$CDS_seq), length = nchar(ref_raw$CDS_seq)) %>% 
+  mutate(ORF = gsub("([ATCG]{3})([ATCG]{3})", '\\1,\\2,', as.character(ORF))) %>% 
+  filter((length %% 3) == 0) %>% 
+  separate_rows(ORF, sep = ",") %>% 
+  group_by(geneName, ORF) %>% 
+  summarise(counts = n()) %>%
+  spread(key = ORF, value = counts, fill = 0) %>% 
+  select(-V1) %>% 
+  inner_join(tibble(geneName = ref_raw$genename, geneLength = nchar(ref_raw$CDS_seq)), by = "geneName") %>%
+  gather(key = codon, value = number, -geneLength, -geneName) %>%
+  mutate(number = number/geneLength) %>%
+  spread(key = codon, value = number) %>%
+  select(-TTT)
+            
+
+
+
+best_codon <- ref_raw %>% 
+  as_tibble() %>% 
+  select(genename, CDS_seq) %>% 
+  mutate(split_CDS = gsub("([ATCG]{3})([ATCG]{3})", '\\1,\\2,', 
+                          as.character(CDS_seq))) %>%
+  bind_cols(., setNames(lapply(codons_raw, 
+                               function(each_codon){ 
+                                 stringr::str_count(.$split_CDS, 
+                                                    each_codon)/nchar(.$CDS_seq)}),
+                        codons_raw)
+            ) %>% 
+  select(-CDS_seq, -split_CDS, -TTT)
+
+```
+
 ```{R Calculate Motif Frequencies}
 #count_motifs function takes a reference dataframe as object and a list of motifs 
 #it also optionally accepts the names of geneName and 3'UTR sequence columns as string 

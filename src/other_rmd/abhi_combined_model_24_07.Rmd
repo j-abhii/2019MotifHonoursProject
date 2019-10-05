@@ -71,7 +71,6 @@ ref_raw <- read_rds("data/Sun_mutation_UTRs.rds")
   
 #Load Manually created motifs list into a vector
 motifs_raw <- scan("data/list_motifs.txt", character())
-motifs_raw <- c(motifs_raw, "HUUUUUUHW")
 
 #load list of 12 Chimeric Terminator Genes  
 list_genes <- scan("data/genes_terminators_list.txt", character())
